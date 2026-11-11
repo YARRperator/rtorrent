@@ -10,10 +10,6 @@ variable "rtorrent_version" {
   default = ""
 }
 
-variable "sha" {
-  default = ""
-}
-
 target "default" {
   platforms = ["linux/amd64", "linux/arm64"]
   args = {
@@ -21,8 +17,7 @@ target "default" {
   }
   tags = [
     "${IMAGE}:latest",
-    "${IMAGE}:alpine${alpine_version}-rtorrent${rtorrent_version}",
-    "${IMAGE}:sha-${sha}"
+    "${IMAGE}:alpine${alpine_version}-${rtorrent_version}"
   ]
   output = ["type=registry"]
 }

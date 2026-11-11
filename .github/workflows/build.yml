@@ -34,12 +34,13 @@ jobs:
       - name: Get rtorrent version
         id: rtorrent-ver
         run: |
-          RT_VER=$(docker run --rm alpine:${{ env.ALPINE_VERSION }} sh -c 'apk add --no-cache rtorrent >/dev/null 2>&1 && apk info rtorrent | head -1')
+          RT_VER=$(docker run --rm alpine:${{ env.ALPINE_VERSION }} sh -c 'apk add --no-cache rtorrent >/dev/null 2>&1 && apk info rtorrent | head -1 | cut -d" " -f1')
           echo "version=$RT_VER" >> $GITHUB_OUTPUT
 
       - name: Bake and push
         uses: docker/bake-action@v6
+        env:
+          BAKE_alpine_version: ${{ env.ALPINE_VERSION }}
+          BAKE_rtorrent_version: ${{ steps.rtorrent-ver.outputs.version }}
         with:
           push: true
-          set: |
-            default.tags=["${{ env.IMAGE }}:latest","${{ env.IMAGE }}:alpine${{ env.ALPINE_VERSION }}-rtorrent${{ steps.rtorrent-ver.outputs.version }}","${{ env.IMAGE }}:sha-${{ github.sha }}"]

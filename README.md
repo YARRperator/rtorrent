@@ -18,7 +18,6 @@ Runs as UID:GID 1000:1000. No home directory.
 |-----|-------------|
 | `:latest` | Latest build from main |
 | `:alpine<alpine>-rtorrent<version>` | Pinned to specific Alpine + rtorrent package versions |
-| `:sha-<commit>` | Pinned to a specific commit of this builder repo |
 
 Example: `ghcr.io/yarrperator/rtorrent:alpine3.24-rtorrent0.16.12-r0`
 
@@ -102,7 +101,7 @@ GitHub Actions workflow at `.github/workflows/build.yml` builds and pushes the i
 The workflow:
 1. Detects the rtorrent package version from the Alpine repo
 2. Builds multi-arch images (amd64 + arm64) via `docker/bake-action`
-3. Pushes three tag variants (latest, version-pinned, commit-pinned)
+3. Pushes two tag variants (latest, version-pinned)
 
 Build configuration is in `docker-bake.hcl`. The Alpine version is a build arg that can be overridden:
 
