@@ -42,8 +42,4 @@ jobs:
         with:
           push: true
           set: |
-            default.tags=[
-              "${{ env.IMAGE }}:latest",
-              "${{ env.IMAGE }}:alpine${{ env.ALPINE_VERSION }}-rtorrent${{ steps.rtorrent-ver.outputs.version }}",
-              "${{ env.IMAGE }}:sha-${{ github.sha }}"
-            ]
+            default.tags=["${{ env.IMAGE }}:latest","${{ env.IMAGE }}:alpine${{ env.ALPINE_VERSION }}-rtorrent${{ steps.rtorrent-ver.outputs.version }}","${{ env.IMAGE }}:sha-${{ github.sha }}"]
