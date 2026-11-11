@@ -7,7 +7,7 @@ variable "alpine_version" {
 }
 
 variable "rtorrent_version" {
-  default = ""
+  default = "rtorrent_version"
 }
 
 target "default" {
