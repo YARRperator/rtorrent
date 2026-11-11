@@ -38,8 +38,8 @@ jobs:
 
       - name: Bake and push
         uses: docker/bake-action@v6
+        env:
+          BAKE_sha: ${{ github.sha }}
+          BAKE_rtorrent_version: ${{ steps.rtorrent-ver.outputs.version }}
         with:
           push: true
-          set: |
-            default.sha=${{ github.sha }}
-            default.rtorrent_version=${{ steps.rtorrent-ver.outputs.version }}
