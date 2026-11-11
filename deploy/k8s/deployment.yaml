@@ -1,0 +1,345 @@
+---
+# Namespace for rtorrent + flood.
+# Everything lives in one namespace to keep it simple.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: rtorrent
+
+---
+# rtorrent configuration.
+# Mount as a ConfigMap so you can edit config without rebuilding the image.
+# The container loads this from /etc/rtorrent/rtorrent.rc by default (CMD).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: rtorrent-config
+  namespace: rtorrent
+data:
+  rtorrent.rc: |
+    # Basic rtorrent configuration.
+    # Full reference: https://github.com/rakshasa/rtorrent/wiki/User-Guide
+
+    # Listening port for incoming BT connections.
+    # Must match the containerPort and Service port below.
+    network.port_range.set = 9510-9510
+    network.port_random.set = no
+
+    # DHT/PEX — disable for private trackers, enable for public.
+    dht.mode.set = disable
+    protocol.pex.set = no
+    trackers.use_udp.set = no
+
+    # Daemon mode: no ncurses UI, runs in background.
+    # Required when running inside a container.
+    system.daemon.set = true
+
+    # SCGI unix socket for flood (or other webuis) to connect to.
+    # The k8s probes check this socket file exists.
+    network.scgi.open_local = /data/socket/rtorrent.socket
+
+    # Where new torrents download to.
+    directory.default.set = /downloads/
+
+    # Session state — rtorrent saves here and reloads on restart.
+    # Losing this means losing your torrent state.
+    session.path.set = /data/session/
+
+    # Log to stdout so kubectl logs shows rtorrent output.
+    log.open_file = "console", /proc/1/fd/1
+    log.add_output = "info", "console"
+
+---
+# PVC for rtorrent session/state data.
+# This is small but important — losing it loses torrent state.
+# Change storageClassName to match your cluster.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: application-data
+  namespace: rtorrent
+spec:
+  storageClassName: ""
+  resources:
+    requests:
+      storage: 10Gi
+  accessModes:
+  - ReadWriteOnce
+
+---
+# PVC for download data.
+# Size this to your needs. Use ReadWriteMany if multiple pods need access
+# (e.g. a separate import/media pod).
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: downloads
+  namespace: rtorrent
+spec:
+  storageClassName: ""
+  resources:
+    requests:
+      storage: 100Gi
+  accessModes:
+  - ReadWriteOnce
+
+---
+# rtorrent deployment.
+# Single replica with Recreate strategy — rtorrent holds session state
+# and should not have two instances running against the same data.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app: rtorrent
+  name: rtorrent
+  namespace: rtorrent
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: rtorrent
+  template:
+    metadata:
+      labels:
+        app: rtorrent
+    spec:
+      # rtorrent needs time to flush session data to disk on shutdown.
+      # 10 minutes gives it plenty of room for large session states.
+      terminationGracePeriodSeconds: 600
+      securityContext:
+        # fsGroup 1000 ensures files on PVCs are owned by the rtorrent user.
+        fsGroup: 1000
+      initContainers:
+      # Create required directories on the PVCs and fix ownership.
+      # Needed because the PVC might be empty or have wrong perms on first mount.
+      - name: setup-dirs
+        image: docker.io/alpine:3.24
+        command:
+        - /bin/sh
+        - -c
+        - |
+          mkdir -pv /data/session
+          mkdir -pv /data/socket
+          chown 1000:1000 /data /data/session /data/socket
+          chown 1000:1000 /downloads
+        volumeMounts:
+        - name: application-data
+          mountPath: /data
+        - name: downloads
+          mountPath: /downloads
+      # Remove stale lock file from a previous run.
+      # If rtorrent crashed without cleanup, the lock prevents restart.
+      - name: remove-lock
+        image: docker.io/alpine:3.24
+        command:
+        - /bin/sh
+        - -c
+        - rm -vf /data/session/rtorrent.lock
+        volumeMounts:
+        - name: application-data
+          mountPath: /data
+      containers:
+      - name: rtorrent
+        image: ghcr.io/yarrperator/rtorrent:latest
+        hostname: rtorrent
+        securityContext:
+          runAsUser: 1000
+          runAsGroup: 1000
+          allowPrivilegeEscalation: false
+        env:
+        # rtorrent needs a HOME dir for some internal state.
+        # Point it at the data PVC since we don't create a home dir in the image.
+        - name: HOME
+          value: /data/home
+        volumeMounts:
+        - name: rtorrent-config
+          mountPath: /etc/rtorrent/rtorrent.rc
+          subPath: rtorrent.rc
+        - name: application-data
+          mountPath: /data
+        - name: downloads
+          mountPath: /downloads
+        ports:
+        - containerPort: 9510
+        # Send SIGINT and wait for rtorrent to finish flushing.
+        # This is more graceful than k8s's default SIGTERM.
+        lifecycle:
+          preStop:
+            exec:
+              command:
+              - /bin/sh
+              - -c
+              - kill -INT 1; while kill -0 1 2>/dev/null; do sleep 1; done
+        # Startup probe: wait for rtorrent to create the SCGI socket.
+        # rtorrent can take a long time to load its session on startup,
+        # so we set an effectively unlimited failure threshold.
+        # Catch stuck pods via monitoring/alerting instead.
+        startupProbe:
+          exec:
+            command:
+            - test
+            - -S
+            - /data/socket/rtorrent.socket
+          periodSeconds: 10
+          failureThreshold: 2147483646
+        # Liveness: if the socket disappears, rtorrent is likely dead.
+        livenessProbe:
+          exec:
+            command:
+            - test
+            - -S
+            - /data/socket/rtorrent.socket
+          periodSeconds: 30
+          failureThreshold: 3
+        # Readiness: pod only receives traffic when socket is up.
+        readinessProbe:
+          exec:
+            command:
+            - test
+            - -S
+            - /data/socket/rtorrent.socket
+          periodSeconds: 10
+          failureThreshold: 3
+      volumes:
+      - name: rtorrent-config
+        configMap:
+          name: rtorrent-config
+      - name: application-data
+        persistentVolumeClaim:
+          claimName: application-data
+      - name: downloads
+        persistentVolumeClaim:
+          claimName: downloads
+
+---
+# Service exposing the BT listening port.
+apiVersion: v1
+kind: Service
+metadata:
+  name: rtorrent
+  namespace: rtorrent
+spec:
+  type: LoadBalancer
+  selector:
+    app: rtorrent
+  ports:
+  - name: bt
+    port: 9510
+    targetPort: 9510
+
+---
+# Flood — web UI for rtorrent.
+# Connects to rtorrent via the SCGI unix socket on the shared data PVC.
+# Image: https://github.com/jesec/flood
+# Pin to a specific version in production.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app: flood
+  name: flood
+  namespace: rtorrent
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: flood
+  template:
+    metadata:
+      labels:
+        app: flood
+    spec:
+      securityContext:
+        fsGroup: 1000
+      initContainers:
+      # Create flood's runtime directory on the shared data PVC.
+      - name: setup-flood-dirs
+        image: docker.io/alpine:3.24
+        command:
+        - /bin/sh
+        - -c
+        - |
+          mkdir -pv /data/home/flood
+          chown 1000:1000 /data/home/flood
+        volumeMounts:
+        - name: application-data
+          mountPath: /data
+        - name: downloads
+          mountPath: /downloads
+      containers:
+      - name: flood
+        image: docker.io/jesec/flood:4.16.4
+        hostname: flood
+        securityContext:
+          runAsUser: 1000
+          runAsGroup: 1000
+          allowPrivilegeEscalation: false
+        command:
+        - /usr/local/bin/node
+        - /usr/local/bin/flood
+        # --auth=none: disable flood's built-in auth.
+        # Use an ingress middleware (e.g. authentik, OAuth proxy) instead.
+        # Or, enable Flood's auth system.
+        - --auth=none
+        - --port=3000
+        - --host=0.0.0.0
+        # Flood needs to see the same paths as rtorrent for file operations.
+        - --allowedpath=/downloads
+        # Connect to rtorrent's SCGI socket on the shared data PVC.
+        - --rtsocket=/data/socket/rtorrent.socket
+        - --rundir=/data/home/flood
+        env:
+        - name: HOME
+          value: /data/home/flood
+        volumeMounts:
+        - name: application-data
+          mountPath: /data
+        - name: downloads
+          mountPath: /downloads
+        ports:
+        - containerPort: 3000
+        livenessProbe:
+          httpGet:
+            path: /
+            port: 3000
+          periodSeconds: 30
+          failureThreshold: 3
+        readinessProbe:
+          httpGet:
+            path: /
+            port: 3000
+          periodSeconds: 10
+          failureThreshold: 3
+      volumes:
+      # Flood shares the same PVCs as rtorrent so it can access
+      # the SCGI socket (/data/socket) and downloads (/downloads).
+      - name: application-data
+        persistentVolumeClaim:
+          claimName: application-data
+      - name: downloads
+        persistentVolumeClaim:
+          claimName: downloads
+
+---
+# Service exposing flood's web UI.
+# Put an Ingress in front of this for external access.
+# In this example, bring your own auth.
+# Or, enable Flood's auth system.
+apiVersion: v1
+kind: Service
+metadata:
+  name: flood
+  namespace: rtorrent
+spec:
+  type: ClusterIP
+  selector:
+    app: flood
+  ports:
+  - name: http
+    port: 3000
+    targetPort: 3000
